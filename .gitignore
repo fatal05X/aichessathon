@@ -7,3 +7,4 @@ submission.zip
 .jbeval
 .venv
 .idea
+*.parquet
