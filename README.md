@@ -1,104 +1,44 @@
-# AI Chessathon starter
+# AI Chessathon Custom Agent
 
-Fork this to build an agent for [AI Chessathon](https://aichessathon.com). It gives you a working
-submission, baselines to beat, and a local harness that speaks the same protocol and enforces the
-same clock as the platform, so you can see whether a change actually helped before you upload it.
+A high-performance classical search chess agent built for the **AI Chessathon**. 
 
-```
-git clone https://github.com/advitrocks9/aichessathon-starter
-cd aichessathon-starter
-make setup
-make play
-```
+The agent runs strictly within the tournament's single-core CPU container limits, utilizing an iterative deepening Alpha-Beta (Negamax) search, tapered PeSTO piece-square evaluation JIT-compiled with Numba, an in-memory Transposition Table, and dynamic time management.
 
-That plays your agent against a baseline over a full 120 s + 0.5 s game and prints the result.
-When you like it, `make zip` and drop `submission.zip` on your dashboard.
+---
 
-## Writing an agent
+## Technical Architecture
 
-`agent.py` is the whole submission. One function:
+### 1. Search Pipeline (`search.py`)
+* **Core Algorithm:** Iterative Deepening Negamax search with Alpha-Beta pruning.
+* **Tactical Extension:** Quiescence search evaluating captures and promotions to prevent the horizon effect.
+* **Move Ordering:**
+  * Transposition Table best move prioritized first.
+  * MVV-LVA (Most Valuable Victim – Least Valuable Attacker) for captures.
+  * Killer move heuristic (2 slots per ply) and history table for quiet moves.
+* **Time Check:** Wall-clock polling every 1024 nodes via bitmask to exit searches cleanly without flagging.
 
-```python
-def get_move(fen: str, time_left_ms: int) -> str:
-    return "e2e4"
-```
+### 2. Fast Evaluation (`eval.py`)
+* **Tapered Heuristics:** Piece-square tables and material evaluations smoothly interpolated between midgame and endgame phases.
+* **Numba JIT Acceleration:** Static evaluation compiled into machine code via `@numba.njit(cache=False)` to maximize nodes/sec on a single CPU core.
+* **Contempt & Draw Awareness:** Penalizes threefold repetitions and near-cap states when holding a winning advantage.
 
-The fork ships a legal random-mover, so the loop works before you write anything. Replace the body.
+### 3. Memory & Match State (`tt.py`, `state.py`, `config.py`)
+* **Transposition Table:** In-memory Zobrist hash table capped at 2,000,000 entries (~150–200 MB) to stay safely inside the 2 GB memory ceiling.
+* **Game History:** Persists across moves in container memory to track half-move counts and repeated positions from the initial curated FEN up to the 600-ply draw cap.
+* **Dynamic Time Budgeting:** Allocates time per move based on `time_left_ms / max(20, expected_moves_remaining)`, adapting gracefully during low-clock scrambles.
 
-```
-make play                                          # one game, real time control
-make arena                                         # 16 fast games, prints a score
-make play FEN="<fen>"                              # start from a given position
-uv run python -m harness.play --black baselines/minimax --pgn game.pgn
-uv run python -m harness.arena --opponent ../my-old-version --games 200
-uv run python -m harness.arena --pgn-dir games
-```
+---
 
-Anything your agent prints shows up under the result, so `print` debugging works. The platform
-keeps the first 4 KB and the last 4 KB, and so does the harness. Every rated game leaves a log on
-your dashboard beside the PGN with your output, your init time, your move times and your clock.
-Only your team can read it.
+## Repository & Submission Structure
 
-Games replay. The opening and the baseline's seed both come from the game number, so a
-deterministic agent plays the same games every run and a score change is a change you made. The
-random mover it ships with is not, so `make arena` wanders until you replace it.
+The platform mandates a completely flat file layout inside `submission.zip` (max 50 MB unzipped):
 
-## The ladder
-
-Measured with `harness/arena.py`. Beating greedy is a search. Beating minimax is a search plus an
-evaluation worth searching with.
-
-| Matchup | Games | Time control | Score |
-|---|---|---|---|
-| random vs greedy | 32 | 10 s + 0.1 s | 4.7% +- 5.1% (+0 =3 -29) |
-| greedy vs minimax | 16 | 120 s + 0.5 s | 0.0% (+0 =0 -16) |
-| numba vs minimax | 16 | 10 s + 0.5 s | 59.4% +- 16.1% (+5 =9 -2) |
-
-Read the third row twice. 59.4% looks like an edge, but the interval runs from -47 to +195 elo,
-so sixteen games have not found one. That is why `make arena` prints it.
-
-```
-uv run python -m harness.arena --agent baselines/random --opponent baselines/greedy --games 32
-uv run python -m harness.arena --agent baselines/greedy --opponent baselines/minimax --games 16 \
-  --base-ms 120000 --increment-ms 500
-uv run python -m harness.arena --agent baselines/numba --opponent baselines/minimax --games 16 \
-  --increment-ms 500
-```
-
-- `baselines/random` plays a uniformly random legal move. It is what `agent.py` starts as, minus
-  the seed the baselines take from the harness.
-- `baselines/greedy` searches one ply on material.
-- `baselines/minimax` searches two plies on material and mobility, with no time management.
-- `baselines/numba` is `minimax` with the evaluation jitted. It is barely stronger, which is
-  the point: jitting a shallow search buys headroom, not depth. Read it for the warm-up call
-  at the bottom, which is how you keep compilation off your clock.
-
-## What's here
-
-```
-agent.py             your submission
-baselines/           random, greedy, minimax, numba; each is a directory with an agent.py
-harness/runner.py    the process the platform runs your agent in
-harness/referee.py   the clock, legality, draw and cap rules
-harness/rules.py     the event constants, and eight openings the rated ladder plays
-harness/sandbox.py   the one process, spoken to as the platform speaks to a container
-harness/play.py      one game between two agent directories
-harness/arena.py     many games, with a score and an interval
-harness/package.py   builds submission.zip and plays the platform's two smoke games from it
-docs/IDEAS.md        where the strength actually comes from
-```
-
-`make zip` ships `agent.py`, every python file beside it, `weights/`, and any package you import.
-Add the rest with `--include`. It then plays two smoke games out of the zip it just built, so a
-file you never packaged fails here instead of on the platform.
-
-Local games start from one of the eight openings unless you pass `--fen`. Rated games draw from
-the full set, which is not published. Treat the eight as a sample, not preparation.
-
-The platform decides acceptance and its validation log is the authority. The smoke games are
-here so a broken zip costs a minute, not one of your ten daily uploads.
-
-## The rules
-
-[aichessathon.com/docs](https://aichessathon.com/docs) is canonical and changes. Read it before
-you upload.
+```text
+submission.zip
+├── agent.py         # Required entrypoint exposing get_move(fen, time_left_ms)
+├── config.py        # Constants (600 max plies, 2M TT entries, dynamic timing)
+├── state.py         # Match history, repetition tracking, and game counters
+├── tt.py            # Memory-safe Transposition Table
+├── eval.py          # Numba-jitted PeSTO evaluation and warmup routines
+├── search.py        # Iterative deepening, Negamax, Quiescence, and move ordering
+└── book.bin         # Optional Polyglot opening book (loaded if present)
